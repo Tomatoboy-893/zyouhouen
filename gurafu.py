@@ -95,16 +95,7 @@ def get_calib_param():
     if e4 is None or e5_lsb is None or e6 is None: return False
     digH.append((e4 << 4) | (e5_lsb & 0x0F))       # H4
     digH.append(((e5_lsb >> 4) & 0x0F) | (e6 << 4)) # H5 - こちらの合成が一般的か確認
-    # Boschデータシートの例ではH5は(dig_H5_msb << 4) | dig_H5_lsbであり、
-    # H4 = register 0xE4<<4 | (0xE5 & 0x0F)
-    # H5 = register 0xE6<<4 | (0xE5>>4 & 0x0F) のような形が多い。
-    # ここでは元のロジックに近い形で実装していますが、正確性はデータシート参照が最善です。
-    # 再確認：Bosch BME280 データシート Rev 1.13 Fig 11 より:
-    # dig_H4 = reg[0xE4] << 4 | (reg[0xE5] & 0x0F)
-    # dig_H5 = (reg[0xE5] >> 4) | (reg[0xE6] << 4)  <- これが正しい可能性が高い
-    # 上記のdigH.appendのH5の行を以下に修正する方がデータシートに忠実かもしれません。
-    # digH.pop() # 最後のH5候補を削除
-    # digH.append(((e5_lsb >> 4) & 0x0F) | (e6 << 4))
+   
 
     val_E7 = read_byte_data_signed(0xE7, signed=True)
     if val_E7 is None: return False
