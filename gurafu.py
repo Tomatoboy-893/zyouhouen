@@ -1,4 +1,4 @@
-#coding: utf-8
+
 
 from smbus2 import SMBus
 import time
