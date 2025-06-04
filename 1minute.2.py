@@ -3,11 +3,10 @@
 from smbus2 import SMBus
 import time
 
-# --- 設定値 (環境に合わせて確認・変更してください) ---
+# --- 設定値 
 # Raspberry PiのI2Cバス番号 (通常は1)
 I2C_BUS_NUMBER  = 1
 # BME280センサーのI2Cアドレス (通常は0x76。0x77の場合もあります)
-# Raspberry Piで `sudo i2cdetect -y 1` コマンドで確認できます
 I2C_ADDRESS = 0x76
 # --- 設定値ここまで ---
 
@@ -164,16 +163,10 @@ def compensate_H(adc_H):
 
     var_H = t_fine - 76800.0
     if var_H == 0: # ゼロ除算の可能性を回避 (厳密には浮動小数点比較に注意)
-        # このケースでどう処理すべきかデータシートを確認。 Boschのコード例では特に分岐なし
-        # 0を返すのが適切か、あるいは特定のエラーを示すか。
-        # ここでは Bosch の参照コードに倣い、そのまま計算を進めることを試みるが、
-        # もし var_H が計算式の分母に来る場合は注意が必要。
-        # BME280データシートの湿度補正計算式では var_H が直接の分母に来る部分は見当たらない。
+      
         pass
 
-    # データシートの計算式に沿って実装
-    # (digHのインデックスとデータシートのH1, H2...の対応に注意)
-    # digH[0]=H1, digH[1]=H2, digH[2]=H3, digH[3]=H4, digH[4]=H5, digH[5]=H6
+   
     
     humidity = adc_H - (digH[3] * 64.0 + digH[4] / 16384.0 * var_H)
     humidity = humidity * (digH[1] / 65536.0 * (1.0 + digH[5] / 67108864.0 * var_H * \
