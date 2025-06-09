@@ -2,16 +2,13 @@
 from smbus2 import SMBus
 import time
 from datetime import datetime
-import csv  # --- 追加: CSVファイル操作用 ---
+import csv  
 
-# --- 設定値 (環境に合わせて確認・変更してください) ---
 I2C_BUS_NUMBER = 1
 I2C_ADDRESS = 0x76
 # --- 追加: 保存するCSVファイル名 ---
 OUTPUT_CSV_FILE = 'bme280_log.csv'
-# --- 設定値ここまで ---
 
-# BME280センサーとの通信やデータ補正に関する関数群 (ここは変更なし)
 # ... (write_reg, read_byte_data_signed, ... compensate_H までの関数はそのまま) ...
 bus = None
 digT = []
@@ -195,8 +192,6 @@ def setup_sensor():
     
     return True
 
-# --- 削除: plot_data関数 ---
-
 def main():
     global bus
     try:
@@ -218,7 +213,7 @@ def main():
         return
     print("補正パラメータ読み出し完了。")
 
-    # --- 追加: CSVファイルのヘッダーを書き込む ---
+
     try:
         with open(OUTPUT_CSV_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -229,7 +224,7 @@ def main():
         print(f"エラー: CSVファイル '{OUTPUT_CSV_FILE}' の準備ができませんでした: {e}")
         if bus: bus.close()
         return
-    # --- ここまで ---
+
 
     measurement_duration = 3600  # 3600秒 = 1時間 測定
     interval = 10  # 10秒間隔
