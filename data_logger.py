@@ -1,4 +1,5 @@
 # 必要なライブラリをインポート
+
 from smbus2 import SMBus
 import time
 from datetime import datetime
