@@ -9,7 +9,6 @@ import collections
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-# --- 設定項目 ---
 I2C_BUS_NUMBER = 1
 I2C_ADDRESS = 0x76
 OUTPUT_CSV_FILE = 'bme280_log.csv'
@@ -34,8 +33,6 @@ fig, ax1 = None, None
 ax2 = None
 line_temp, line_hum, line_pres = None, None, None
 
-
-# --- ここから BME280センサーの制御・データ補正に関する関数 ---
 
 def write_reg(reg_address, data):
     if bus is None:
@@ -213,8 +210,6 @@ def setup_sensor():
     
     return True
 
-# --- ここから グラフ表示関連の関数 ---
-
 def init_graph():
     """グラフの初期設定を行う"""
     global fig, ax1, ax2, line_temp, line_hum, line_pres
@@ -286,7 +281,6 @@ def update_graph(frame):
 
     return line_temp, line_hum, line_pres
 
-# --- メイン処理 ---
 def main():
     """メイン処理"""
     global bus
