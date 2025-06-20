@@ -12,6 +12,3 @@ raspberry側（学校の北を使う場合等)で規制が入っている場合�
 ・データ取得　data_logger.pyで可能←ラズパイ側<br>
 ・グラフ化 plot_bme_data.pyで可能←自身のPCでの実行<br>
 ・matplotは、ラズパイ側での規制が入ってるので、使えないので、一括してグラフ化までは行えない。<br>
-bme280_complete.pyでもしかしたら一括できるかも？？<br>
-↓<br>
-pip install matplotlibを仮想環境で実行
