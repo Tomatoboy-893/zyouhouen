@@ -19,5 +19,5 @@ raspberry側（例外もある）で規制が入っている場合があるの�
 pip install Flask #webフレームを作成するライブラリーのdownloadをしないと、web上で見ることができない<br>
 app.pyと、index.htmlでのシステムでは、ラズパイと同じwifiに接続しないとみることができない。<br>
 解決方法<p>
-・wifiの設定変更<p>
+・wifiの設定変更（ルーターの）<p>
 ・pvn接続
