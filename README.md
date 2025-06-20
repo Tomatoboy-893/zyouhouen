@@ -20,4 +20,9 @@ pip install Flask #webフレームを作成するライブラリーのdownload�
 app.pyと、index.htmlでのシステムでは、ラズパイと同じwifiに接続しないとみることができない。<br>
 解決方法<p>
 ・wifiの設定変更（ルーターの）<p>
-・pvn接続
+・pvn接続<p>
+app.pyと、index.htmlのディレクトリ構成<p>
+/home/pi/sensor_app/ #カウントディレクトリ<p>
+├── app.py<p>
+└── templates/<p>
+    └── index.html
