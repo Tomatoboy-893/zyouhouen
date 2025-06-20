@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ラズパイ温湿度モニタリング</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        h1, h2 {
+            text-align: center;
+            color: #0056b3;
+        }
+        .data-display {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        .data-item {
+            background-color: #e9ecef;
+            padding: 15px 25px;
+            border-radius: 5px;
+            text-align: center;
+            margin: 10px;
+            flex: 1;
+            min-width: 150px; /* 小さすぎるのを防ぐ */
+        }
+        .data-item strong {
+            display: block;
+            font-size: 1.2em;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        .data-value {
+            font-size: 2.2em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .timestamp {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        canvas {
+            max-width: 100%;
+            height: auto;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ラズパイ温湿度モニタリングシステム</h1>
+        <div class="data-display">
+            <div class="data-item">
+                <strong>温度</strong>
+                <span id="temperature" class="data-value">--.- °C</span>
+            </div>
+            <div class="data-item">
+                <strong>気圧</strong>
+                <span id="pressure" class="data-value">----.- hPa</span>
+            </div>
+            <div class="data-item">
+                <strong>湿度</strong>
+                <span id="humidity" class="data-value">--.- %</span>
+            </div>
+        </div>
+        <p class="timestamp">最終更新: <span id="last-updated">N/A</span></p>
+
+        <hr>
+
+        <h2>過去のデータトレンド</h2>
+        <canvas id="sensorChart"></canvas>
+    </div>
+
+    <script>
+        const temperatureElement = document.getElementById('temperature');
+        const pressureElement = document.getElementById('pressure');
+        const humidityElement = document.getElementById('humidity');
+        const lastUpdatedElement = document.getElementById('last-updated');
+        const ctx = document.getElementById('sensorChart').getContext('2d');
+
+        let sensorChart; // Chart.jsのインスタンスを保持
+
+        // グラフを初期化する関数
+        function initChart() {
+            sensorChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [], // 時刻ラベル
+                    datasets: [
+                        {
+                            label: '温度 (°C)',
+                            data: [],
+                            borderColor: 'rgb(255, 99, 132)',
+                            tension: 0.1,
+                            fill: false
+                        },
+                        {
+                            label: '気圧 (hPa)',
+                            data: [],
+                            borderColor: 'rgb(54, 162, 235)',
+                            tension: 0.1,
+                            fill: false,
+                            yAxisID: 'y1' // 異なるY軸を使用
+                        },
+                        {
+                            label: '湿度 (%)',
+                            data: [],
+                            borderColor: 'rgb(75, 192, 192)',
+                            tension: 0.1,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                parser: 'YYYY-MM-DDTHH:mm:ss.SSSSSS', // ISO 8601フォーマットをパース
+                                tooltipFormat: 'YYYY/MM/DD HH:mm:ss',
+                                displayFormats: {
+                                    minute: 'HH:mm',
+                                    hour: 'HH:mm',
+                                    day: 'MM/DD'
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: '時刻'
+                            }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: '温度 (°C) / 湿度 (%)'
+                            },
+                            min: 0,
+                            max: 100 // 温度と湿度のため
+                        },
+                        y1: { // 気圧用のY軸
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: '気圧 (hPa)'
+                            },
+                            grid: {
+                                drawOnChartArea: false, // 左側のY軸のグリッド線が重複しないように
+                            },
+                            min: 950, // 気圧の一般的な範囲
+                            max: 1050
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        }
+                    }
+                }
+            });
+        }
+
+        // データを取得して表示・更新する関数
+        async function fetchSensorData() {
+            try {
+                const response = await fetch('/data'); // Flaskの/dataエンドポイントにアクセス
+                const data = await response.json();
+
+                if (response.ok) {
+                    if (data.length > 0) {
+                        const latestData = data[data.length - 1]; // 最新データ
+
+                        temperatureElement.textContent = `${latestData.temperature.toFixed(2)} °C`;
+                        pressureElement.textContent = `${latestData.pressure.toFixed(2)} hPa`;
+                        humidityElement.textContent = `${latestData.humidity.toFixed(2)} %`;
+                        lastUpdatedElement.textContent = new Date(latestData.timestamp).toLocaleString();
+
+                        // グラフデータを更新
+                        updateChart(data);
+                    } else {
+                        console.warn("No data received from sensor.");
+                        temperatureElement.textContent = "--.- °C";
+                        pressureElement.textContent = "----.- hPa";
+                        humidityElement.textContent = "--.- %";
+                        lastUpdatedElement.textContent = "データなし";
+                    }
+                } else {
+                    console.error("Error fetching data:", data.error);
+                    temperatureElement.textContent = "取得失敗";
+                    pressureElement.textContent = "取得失敗";
+                    humidityElement.textContent = "取得失敗";
+                    lastUpdatedElement.textContent = "エラー";
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                temperatureElement.textContent = "通信エラー";
+                pressureElement.textContent = "通信エラー";
+                humidityElement.textContent = "通信エラー";
+                lastUpdatedElement.textContent = "通信エラー";
+            }
+        }
+
+        // グラフデータを更新する関数
+        function updateChart(data) {
+            const labels = data.map(item => item.timestamp);
+            const temperatures = data.map(item => item.temperature);
+            const pressures = data.map(item => item.pressure);
+            const humidities = data.map(item => item.humidity);
+
+            sensorChart.data.labels = labels;
+            sensorChart.data.datasets[0].data = temperatures;
+            sensorChart.data.datasets[1].data = pressures;
+            sensorChart.data.datasets[2].data = humidities;
+            sensorChart.update(); // グラフを再描画
+        }
+
+        // ページロード時にグラフを初期化
+        initChart();
+        // 初回データ取得
+        fetchSensorData();
+        // 10秒ごとにデータを更新 (センサー測定間隔に合わせる)
+        setInterval(fetchSensorData, 10000);
+    </script>
+</body>
+</html>
