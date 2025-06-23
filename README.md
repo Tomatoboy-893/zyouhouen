@@ -26,3 +26,9 @@ app.pyと、index.htmlのディレクトリ構成<p>
 ├── app.py<p>
 └── templates/<p>
     └── index.html
+<br>
+ファイアウォールの関係で以下のコードで、ポートの解放、ファイアウォールの解除を行う必要がある<br>
+ sudo ufw allow 5000/tcp　5000のポートを解放<br>
+ sudo ufw disable ファイアウォールの解放<br>
+ sudo ufw enable ファイアウォールの再開　<br>
+ ※ファイアウォールの解放は実験中に限る<br>
