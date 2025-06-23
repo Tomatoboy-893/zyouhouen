@@ -6,6 +6,9 @@ from datetime import datetime
 import collections
 import threading
 import logging
+import signal
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import queue
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,6 +24,8 @@ digP = []
 digH = []
 t_fine = 0.0
 sensor_initialized = False
+data_lock = threading.Lock()
+latest_data = None
 
 def write_reg(reg_address, data):
     global bus
@@ -205,6 +210,22 @@ def read_compensated_data():
     humidity = compensate_H(hum_raw)
     return temperature, pressure, humidity
 
+def read_compensated_data_with_timeout(timeout=5):
+    """タイムアウト付きでセンサーデータを読み取り"""
+    def _read_data():
+        return read_compensated_data()
+    
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            future = executor.submit(_read_data)
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            logger.warning("センサーデータ読み取りがタイムアウトしました")
+            return None, None, None
+        except Exception as e:
+            logger.error(f"センサーデータ読み取り中にエラーが発生: {e}")
+            return None, None, None
+
 def setup_sensor():
     osrs_t = 1; osrs_p = 1; osrs_h = 1
     mode = 3; t_sb = 5; filter_coeff = 0; spi3w_en = 0
@@ -250,18 +271,38 @@ def initialize_sensor():
 
 def data_collection_thread():
     """定期的にセンサーデータを取得するバックグラウンドスレッド"""
+    global latest_data
+    consecutive_failures = 0
+    max_failures = 5
+    
     while True:
         if sensor_initialized:
-            temp, pres, hum = read_compensated_data()
+            temp, pres, hum = read_compensated_data_with_timeout(timeout=3)
             if temp is not None and pres is not None and hum is not None:
                 data = {
                     'timestamp': datetime.now().isoformat(),
                     'temperature': round(temp, 2),
-                    'pressure': round(pres, 2),  # 修正: presに変更
+                    'pressure': round(pres, 2),
                     'humidity': round(hum, 2)
                 }
-                sensor_data_history.append(data)
+                
+                with data_lock:
+                    sensor_data_history.append(data)
+                    latest_data = data
+                
+                consecutive_failures = 0
                 logger.debug(f"データ取得: 温度={temp:.2f}°C, 気圧={pres:.2f}hPa, 湿度={hum:.2f}%")
+            else:
+                consecutive_failures += 1
+                logger.warning(f"データ取得失敗 ({consecutive_failures}/{max_failures})")
+                
+                if consecutive_failures >= max_failures:
+                    logger.error("連続してデータ取得に失敗しました。センサーを再初期化します。")
+                    if initialize_sensor():
+                        consecutive_failures = 0
+                        logger.info("センサー再初期化完了")
+                    else:
+                        logger.error("センサー再初期化失敗")
         
         time.sleep(10)  # 10秒間隔でデータ取得
 
@@ -294,28 +335,57 @@ def index():
 
 @app.route('/data')
 def get_data():
-    """センサーデータをJSON形式で提供するAPIエンドポイント"""
-    if sensor_data_history:
-        return jsonify(list(sensor_data_history))
-    else:
-        # センサーが初期化されていない場合は模擬データを返す
-        mock_data = [{
-            'timestamp': datetime.now().isoformat(),
-            'temperature': 25.0,
-            'pressure': 1013.25,
-            'humidity': 50.0
-        }]
-        return jsonify(mock_data)
+    """センサーデータをJSON形式で提供するAPIエンドポイント（高速レスポンス）"""
+    with data_lock:
+        if sensor_data_history:
+            # 最新の10個のデータのみ返す（レスポンス高速化）
+            recent_data = list(sensor_data_history)[-10:]
+            return jsonify(recent_data)
+        else:
+            # センサーが初期化されていない場合は模擬データを返す
+            mock_data = [{
+                'timestamp': datetime.now().isoformat(),
+                'temperature': 25.0,
+                'pressure': 1013.25,
+                'humidity': 50.0
+            }]
+            return jsonify(mock_data)
+
+@app.route('/data/all')
+def get_all_data():
+    """全データを取得（重い処理）"""
+    with data_lock:
+        if sensor_data_history:
+            return jsonify(list(sensor_data_history))
+        else:
+            return jsonify([])
+
+@app.route('/data/latest')
+def get_latest_data():
+    """最新のデータのみを高速取得"""
+    with data_lock:
+        if latest_data:
+            return jsonify(latest_data)
+        else:
+            return jsonify({
+                'timestamp': datetime.now().isoformat(),
+                'temperature': 25.0,
+                'pressure': 1013.25,
+                'humidity': 50.0
+            })
 
 @app.route('/status')
 def get_status():
     """センサーの状態を返すAPIエンドポイント"""
-    return jsonify({
-        'sensor_initialized': sensor_initialized,
-        'data_points': len(sensor_data_history),
-        'bus_number': I2C_BUS_NUMBER,
-        'i2c_address': hex(I2C_ADDRESS)
-    })
+    with data_lock:
+        return jsonify({
+            'sensor_initialized': sensor_initialized,
+            'data_points': len(sensor_data_history),
+            'bus_number': I2C_BUS_NUMBER,
+            'i2c_address': hex(I2C_ADDRESS),
+            'latest_timestamp': latest_data['timestamp'] if latest_data else None,
+            'uptime': datetime.now().isoformat()
+        })
 
 @app.errorhandler(500)
 def internal_error(error):
@@ -328,4 +398,11 @@ if __name__ == '__main__':
     
     # Flaskアプリケーションを実行
     logger.info("Flaskアプリケーションを開始します...")
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    
+    try:
+        app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, 
+                request_timeout=30, response_timeout=30)
+    except KeyboardInterrupt:
+        logger.info("アプリケーションを終了します...")
+    except Exception as e:
+        logger.error(f"アプリケーション実行中にエラーが発生: {e}")
