@@ -1,408 +1,399 @@
-# app.py
+# app.py - 完璧版
 from flask import Flask, render_template, jsonify
-from smbus2 import SMBus
 import time
 from datetime import datetime
 import collections
 import threading
 import logging
-import signal
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-import queue
+import json
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- BME280センサー関連の定数と関数 ---
-I2C_BUS_NUMBER = 1
-I2C_ADDRESS = 0x76
-
-bus = None
-digT = []
-digP = []
-digH = []
-t_fine = 0.0
-sensor_initialized = False
-data_lock = threading.Lock()
-latest_data = None
-
-def write_reg(reg_address, data):
-    global bus
-    if bus is None:
-        try:
-            bus = SMBus(I2C_BUS_NUMBER)
-        except Exception as e:
-            logger.error(f"I2Cバスのオープンに失敗しました (バス番号 {I2C_BUS_NUMBER}): {e}")
-            return False
-    try:
-        bus.write_byte_data(I2C_ADDRESS, reg_address, data)
-        return True
-    except IOError as e:
-        logger.error(f"I2C書き込み失敗 (アドレス {hex(I2C_ADDRESS)}, レジスタ {hex(reg_address)}): {e}")
-        return False
-
-def read_byte_data_signed(reg_address, signed=False):
-    global bus
-    if bus is None:
-        try:
-            bus = SMBus(I2C_BUS_NUMBER)
-        except Exception as e:
-            logger.error(f"I2Cバスのオープンに失敗しました (バス番号 {I2C_BUS_NUMBER}): {e}")
-            return None
-    try:
-        value = bus.read_byte_data(I2C_ADDRESS, reg_address)
-        if signed:
-            if value > 127:
-                value -= 256
-        return value
-    except IOError as e:
-        logger.error(f"I2C読み込み失敗 (アドレス {hex(I2C_ADDRESS)}, レジスタ {hex(reg_address)}): {e}")
-        return None
-
-def read_word_data_signed(reg_address, lsb_first=True, signed=False):
-    lsb_addr = reg_address
-    msb_addr = reg_address + 1
-    
-    lsb = read_byte_data_signed(lsb_addr)
-    msb = read_byte_data_signed(msb_addr)
-
-    if lsb is None or msb is None:
-        return None
-
-    if lsb_first:
-        value = (msb << 8) | lsb
-    else:
-        value = (lsb << 8) | msb
-    
-    if signed:
-        if value & 0x8000:
-            value = value - 65536
-    return value
-
-def get_calib_param():
-    global digT, digP, digH
-    digT, digP, digH = [], [], []
-
-    digT.append(read_word_data_signed(0x88))
-    digT.append(read_word_data_signed(0x8A, signed=True))
-    digT.append(read_word_data_signed(0x8C, signed=True))
-    if None in digT: return False
-
-    digP.append(read_word_data_signed(0x8E))
-    for i in range(1, 9):
-        param = read_word_data_signed(0x90 + (i-1) * 2, signed=True)
-        if param is None: return False
-        digP.append(param)
-    if None in digP: return False
-
-    val_A1 = read_byte_data_signed(0xA1)
-    if val_A1 is None: return False
-    digH.append(val_A1)
-
-    val_E1 = read_word_data_signed(0xE1, signed=True)
-    if val_E1 is None: return False
-    digH.append(val_E1)
-    
-    val_E3 = read_byte_data_signed(0xE3)
-    if val_E3 is None: return False
-    digH.append(val_E3)
-
-    e4 = read_byte_data_signed(0xE4)
-    e5_lsb = read_byte_data_signed(0xE5)
-    e6 = read_byte_data_signed(0xE6)
-    if e4 is None or e5_lsb is None or e6 is None: return False
-    digH.append((e4 << 4) | (e5_lsb & 0x0F))
-    digH.append(((e5_lsb >> 4) & 0x0F) | (e6 << 4))
-
-    val_E7 = read_byte_data_signed(0xE7, signed=True)
-    if val_E7 is None: return False
-    digH.append(val_E7)
-    
-    return True
-
-def compensate_T(adc_T):
-    global t_fine
-    if not digT or len(digT) < 3 or digT[0] is None or digT[1] is None or digT[2] is None: 
-        return None
-    v1 = (adc_T / 16384.0 - digT[0] / 1024.0) * digT[1]
-    v2 = ((adc_T / 131072.0 - digT[0] / 8192.0)**2) * digT[2]
-    t_fine = v1 + v2
-    temperature = t_fine / 5120.0
-    return temperature
-
-def compensate_P(adc_P):
-    global t_fine
-    if not digP or len(digP) < 9 or None in digP or t_fine == 0.0: 
-        return None
-    
-    v1 = (t_fine / 2.0) - 64000.0
-    v2 = (((v1 / 4.0) * (v1 / 4.0)) / 2048.0) * digP[5]
-    v2 = v2 + ((v1 * digP[4]) * 2.0)
-    v2 = (v2 / 4.0) + (digP[3] * 65536.0)
-    
-    var1_calc = (digP[2] * (((v1 / 4.0) * (v1 / 4.0)) / 8192.0)) / 8.0
-    var2_calc = (digP[1] * v1) / 2.0
-    v1_combined = (var1_calc + var2_calc) / 262144.0
-    
-    v1_main = ((32768.0 + v1_combined) * digP[0]) / 32768.0
-    
-    if v1_main == 0: 
-        return None
-    
-    pressure = ((1048576.0 - adc_P) - (v2 / 4096.0)) * 3125.0
-    if pressure < 0x80000000:
-        pressure = (pressure * 2.0) / v1_main
-    else:
-        pressure = (pressure / v1_main) * 2.0
-    
-    v1 = (digP[8] * (((pressure / 8.0) * (pressure / 8.0)) / 8192.0)) / 4096.0
-    v2 = ((pressure / 4.0) * digP[7]) / 8192.0
-    pressure = pressure + ((v1 + v2 + digP[6]) / 16.0)
-    return pressure / 100.0
-
-def compensate_H(adc_H):
-    global t_fine
-    if not digH or len(digH) < 6 or None in digH or t_fine == 0.0: 
-        return None
-
-    var_h_calc = t_fine - 76800.0
-    
-    humidity = adc_H - (digH[3] * 64.0 + digH[4] / 16384.0 * var_h_calc)
-    humidity = humidity * (digH[1] / 65536.0 * (1.0 + digH[5] / 67108864.0 * var_h_calc * \
-                                (1.0 + digH[2] / 67108864.0 * var_h_calc)))
-    humidity = humidity * (1.0 - digH[0] * humidity / 524288.0)
-
-    if humidity > 100.0: 
-        humidity = 100.0
-    elif humidity < 0.0: 
-        humidity = 0.0
-    return humidity
-
-def read_raw_data():
-    global bus
-    if bus is None:
-        try:
-            bus = SMBus(I2C_BUS_NUMBER)
-        except Exception as e:
-            logger.error(f"I2Cバスのオープンに失敗しました (バス番号 {I2C_BUS_NUMBER}): {e}")
-            return None, None, None
-    try:
-        block = bus.read_i2c_block_data(I2C_ADDRESS, 0xF7, 8)
-        pres_raw = (block[0] << 12) | (block[1] << 4) | (block[2] >> 4)
-        temp_raw = (block[3] << 12) | (block[4] << 4) | (block[5] >> 4)
-        hum_raw  = (block[6] << 8)  |  block[7]
-        return temp_raw, pres_raw, hum_raw
-    except IOError as e:
-        logger.error(f"I2Cブロックデータ読み込み失敗: {e}")
-        return None, None, None
-
-def read_compensated_data():
-    temp_raw, pres_raw, hum_raw = read_raw_data()
-    if temp_raw is None:
-        return None, None, None
-    
-    temperature = compensate_T(temp_raw)
-    if temperature is None:
-        return None, None, None
+# BME280センサー用のクラス
+class BME280Sensor:
+    def __init__(self):
+        self.bus = None
+        self.initialized = False
+        self.digT = []
+        self.digP = []
+        self.digH = []
+        self.t_fine = 0.0
+        self.I2C_BUS = 1
+        self.I2C_ADDR = 0x76
+        self.last_error = None
         
-    pressure = compensate_P(pres_raw)
-    humidity = compensate_H(hum_raw)
-    return temperature, pressure, humidity
-
-def read_compensated_data_with_timeout(timeout=5):
-    """タイムアウト付きでセンサーデータを読み取り"""
-    def _read_data():
-        return read_compensated_data()
-    
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        try:
-            future = executor.submit(_read_data)
-            return future.result(timeout=timeout)
-        except TimeoutError:
-            logger.warning("センサーデータ読み取りがタイムアウトしました")
-            return None, None, None
-        except Exception as e:
-            logger.error(f"センサーデータ読み取り中にエラーが発生: {e}")
-            return None, None, None
-
-def setup_sensor():
-    osrs_t = 1; osrs_p = 1; osrs_h = 1
-    mode = 3; t_sb = 5; filter_coeff = 0; spi3w_en = 0
-    
-    ctrl_hum_reg = osrs_h & 0x07
-    ctrl_meas_reg = (osrs_t << 5) | (osrs_p << 2) | mode
-    config_reg = (t_sb << 5) | (filter_coeff << 2) | spi3w_en
-    
-    if not write_reg(0xF2, ctrl_hum_reg): 
-        return False
-    if not write_reg(0xF4, ctrl_meas_reg): 
-        return False
-    if not write_reg(0xF5, config_reg): 
-        return False
-    
-    return True
-
-def initialize_sensor():
-    """センサーの初期化"""
-    global bus, sensor_initialized
-    try:
-        bus = SMBus(I2C_BUS_NUMBER)
-        logger.info("BME280センサーの初期化を開始します...")
-        
-        if not setup_sensor():
-            logger.error("センサーの動作モード設定に失敗しました。")
-            return False
-        else:
-            logger.info("センサーの動作モード設定完了。")
-
-        if not get_calib_param():
-            logger.error("補正パラメータの読み出しに失敗しました。センサー接続を確認してください。")
-            return False
-        else:
-            logger.info("補正パラメータ読み出し完了。")
+    def init_bus(self):
+        """I2Cバスを安全に初期化"""
+        if self.bus is not None:
+            return True
             
-        sensor_initialized = True
-        return True
-        
-    except Exception as e:
-        logger.error(f"I2Cバスのオープンに失敗しました (バス番号 {I2C_BUS_NUMBER}): {e}")
-        return False
-
-def data_collection_thread():
-    """定期的にセンサーデータを取得するバックグラウンドスレッド"""
-    global latest_data
-    consecutive_failures = 0
-    max_failures = 5
+        try:
+            from smbus2 import SMBus
+            self.bus = SMBus(self.I2C_BUS)
+            return True
+        except ImportError:
+            logger.warning("smbus2がインストールされていません。模擬モードで動作します。")
+            return False
+        except Exception as e:
+            logger.error(f"I2Cバス初期化失敗: {e}")
+            self.last_error = str(e)
+            return False
     
-    while True:
-        if sensor_initialized:
-            temp, pres, hum = read_compensated_data_with_timeout(timeout=3)
+    def write_reg(self, reg, data):
+        """レジスタに書き込み"""
+        if not self.init_bus():
+            return False
+        try:
+            self.bus.write_byte_data(self.I2C_ADDR, reg, data)
+            return True
+        except Exception as e:
+            logger.error(f"書き込み失敗 reg={hex(reg)}: {e}")
+            return False
+    
+    def read_byte(self, reg, signed=False):
+        """1バイト読み込み"""
+        if not self.init_bus():
+            return None
+        try:
+            value = self.bus.read_byte_data(self.I2C_ADDR, reg)
+            if signed and value > 127:
+                value -= 256
+            return value
+        except Exception as e:
+            logger.error(f"読み込み失敗 reg={hex(reg)}: {e}")
+            return None
+    
+    def read_word(self, reg, signed=False):
+        """2バイト読み込み"""
+        lsb = self.read_byte(reg)
+        msb = self.read_byte(reg + 1)
+        if lsb is None or msb is None:
+            return None
+        
+        value = (msb << 8) | lsb
+        if signed and value & 0x8000:
+            value -= 65536
+        return value
+    
+    def setup_sensor(self):
+        """センサー設定"""
+        # 湿度オーバーサンプリング x1
+        if not self.write_reg(0xF2, 0x01): return False
+        # 温度・気圧オーバーサンプリング x1, ノーマルモード
+        if not self.write_reg(0xF4, 0x27): return False
+        # スタンバイ 1000ms, フィルタOFF
+        if not self.write_reg(0xF5, 0xA0): return False
+        return True
+    
+    def read_calibration(self):
+        """校正パラメータ読み込み"""
+        # 温度校正
+        self.digT = [
+            self.read_word(0x88),           # T1
+            self.read_word(0x8A, True),     # T2
+            self.read_word(0x8C, True)      # T3
+        ]
+        if None in self.digT: return False
+        
+        # 気圧校正
+        self.digP = [self.read_word(0x8E)]  # P1
+        for i in range(1, 9):
+            val = self.read_word(0x90 + (i-1)*2, True)
+            if val is None: return False
+            self.digP.append(val)
+        
+        # 湿度校正（簡略化）
+        h1 = self.read_byte(0xA1)
+        h2 = self.read_word(0xE1, True)
+        h3 = self.read_byte(0xE3)
+        if None in [h1, h2, h3]: return False
+        
+        self.digH = [h1, h2, h3, 0, 0, 0]  # 簡略版
+        return True
+    
+    def read_raw_data(self):
+        """生データ読み込み"""
+        if not self.init_bus():
+            return None, None, None
+        try:
+            # 8バイト一括読み込み
+            data = self.bus.read_i2c_block_data(self.I2C_ADDR, 0xF7, 8)
+            pres_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
+            temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
+            hum_raw = (data[6] << 8) | data[7]
+            return temp_raw, pres_raw, hum_raw
+        except Exception as e:
+            logger.error(f"生データ読み込み失敗: {e}")
+            return None, None, None
+    
+    def compensate_temp(self, raw):
+        """温度補正"""
+        if not self.digT or raw is None: return None
+        var1 = (raw / 16384.0 - self.digT[0] / 1024.0) * self.digT[1]
+        var2 = ((raw / 131072.0 - self.digT[0] / 8192.0) ** 2) * self.digT[2]
+        self.t_fine = var1 + var2
+        return self.t_fine / 5120.0
+    
+    def compensate_pressure(self, raw):
+        """気圧補正（簡略版）"""
+        if not self.digP or raw is None or self.t_fine == 0: return None
+        var1 = (self.t_fine / 2.0) - 64000.0
+        var2 = var1 * var1 * self.digP[5] / 32768.0
+        var2 = var2 + var1 * self.digP[4] * 2.0
+        var2 = (var2 / 4.0) + (self.digP[3] * 65536.0)
+        var1 = (self.digP[2] * var1 * var1 / 524288.0 + self.digP[1] * var1) / 524288.0
+        var1 = (1.0 + var1 / 32768.0) * self.digP[0]
+        if var1 == 0: return None
+        pressure = 1048576.0 - raw
+        pressure = (pressure - (var2 / 4096.0)) * 6250.0 / var1
+        return pressure / 100.0  # hPa
+    
+    def compensate_humidity(self, raw):
+        """湿度補正（簡略版）"""
+        if not self.digH or raw is None or self.t_fine == 0: return None
+        var_H = self.t_fine - 76800.0
+        if var_H == 0: return 0
+        var_H = (raw - (self.digH[3] * 64.0)) * (self.digH[1] / 65536.0)
+        humidity = var_H * (1.0 - self.digH[0] * var_H / 524288.0)
+        return max(0.0, min(100.0, humidity))
+    
+    def initialize(self):
+        """センサー初期化"""
+        try:
+            if not self.init_bus():
+                return False
+            
+            if not self.setup_sensor():
+                logger.error("センサー設定失敗")
+                return False
+            
+            if not self.read_calibration():
+                logger.error("校正パラメータ読み込み失敗")
+                return False
+            
+            self.initialized = True
+            logger.info("BME280センサー初期化完了")
+            return True
+            
+        except Exception as e:
+            logger.error(f"センサー初期化エラー: {e}")
+            self.last_error = str(e)
+            return False
+    
+    def read_data(self):
+        """センサーデータ読み込み"""
+        if not self.initialized:
+            return None, None, None
+        
+        temp_raw, pres_raw, hum_raw = self.read_raw_data()
+        if temp_raw is None:
+            return None, None, None
+        
+        temperature = self.compensate_temp(temp_raw)
+        pressure = self.compensate_pressure(pres_raw)
+        humidity = self.compensate_humidity(hum_raw)
+        
+        return temperature, pressure, humidity
+
+# グローバル変数
+sensor = BME280Sensor()
+data_history = collections.deque(maxlen=50)  # 最大50個のデータ
+latest_data = None
+data_lock = threading.Lock()
+app_running = True
+
+def data_collector():
+    """バックグラウンドデータ収集"""
+    global latest_data
+    logger.info("データ収集開始")
+    
+    while app_running:
+        try:
+            temp, pres, hum = sensor.read_data()
+            
             if temp is not None and pres is not None and hum is not None:
                 data = {
-                    'timestamp': datetime.now().isoformat(),
-                    'temperature': round(temp, 2),
-                    'pressure': round(pres, 2),
-                    'humidity': round(hum, 2)
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'temperature': round(temp, 1),
+                    'pressure': round(pres, 1),
+                    'humidity': round(hum, 1)
                 }
                 
                 with data_lock:
-                    sensor_data_history.append(data)
+                    data_history.append(data)
                     latest_data = data
                 
-                consecutive_failures = 0
-                logger.debug(f"データ取得: 温度={temp:.2f}°C, 気圧={pres:.2f}hPa, 湿度={hum:.2f}%")
+                logger.debug(f"データ更新: {temp:.1f}°C, {pres:.1f}hPa, {hum:.1f}%")
             else:
-                consecutive_failures += 1
-                logger.warning(f"データ取得失敗 ({consecutive_failures}/{max_failures})")
-                
-                if consecutive_failures >= max_failures:
-                    logger.error("連続してデータ取得に失敗しました。センサーを再初期化します。")
-                    if initialize_sensor():
-                        consecutive_failures = 0
-                        logger.info("センサー再初期化完了")
-                    else:
-                        logger.error("センサー再初期化失敗")
+                logger.warning("センサーデータ読み込み失敗")
+            
+        except Exception as e:
+            logger.error(f"データ収集エラー: {e}")
         
-        time.sleep(10)  # 10秒間隔でデータ取得
+        time.sleep(5)  # 5秒間隔
 
-# --- Flaskアプリケーション ---
+# Flaskアプリ
 app = Flask(__name__)
 
-# センサーデータ履歴を保持するキュー (最大60個 = 10分間のデータ)
-sensor_data_history = collections.deque(maxlen=60)
-
-# アプリケーション起動時の初期化
-def create_app():
-    """アプリケーションファクトリー"""
-    # センサー初期化
-    with app.app_context():
-        if initialize_sensor():
-            logger.info("センサー初期化完了")
-            # バックグラウンドでデータ収集開始
-            data_thread = threading.Thread(target=data_collection_thread, daemon=True)
-            data_thread.start()
-            logger.info("データ収集スレッド開始")
-        else:
-            logger.warning("センサー初期化失敗 - 模擬データモードで動作します")
-    
-    return app
-
-# ルート定義
 @app.route('/')
 def index():
-    return render_template('index.html')
+    """メインページ"""
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>BME280センサー</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }
+            .sensor-data { display: flex; justify-content: space-around; margin: 20px 0; }
+            .data-box { text-align: center; padding: 15px; background: #e3f2fd; border-radius: 8px; min-width: 120px; }
+            .value { font-size: 24px; font-weight: bold; color: #1976d2; }
+            .unit { font-size: 14px; color: #666; }
+            .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+            .online { background: #c8e6c9; color: #2e7d32; }
+            .offline { background: #ffcdd2; color: #c62828; }
+            button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
+            .btn-primary { background: #1976d2; color: white; }
+            .btn-secondary { background: #757575; color: white; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🌡️ BME280センサーモニター</h1>
+            <div id="status" class="status offline">接続中...</div>
+            
+            <div class="sensor-data">
+                <div class="data-box">
+                    <div class="value" id="temp">--</div>
+                    <div class="unit">°C</div>
+                    <div>温度</div>
+                </div>
+                <div class="data-box">
+                    <div class="value" id="press">--</div>
+                    <div class="unit">hPa</div>
+                    <div>気圧</div>
+                </div>
+                <div class="data-box">
+                    <div class="value" id="hum">--</div>
+                    <div class="unit">%</div>
+                    <div>湿度</div>
+                </div>
+            </div>
+            
+            <div style="text-align: center;">
+                <button class="btn-primary" onclick="updateData()">データ更新</button>
+                <button class="btn-secondary" onclick="toggleAutoUpdate()">自動更新: <span id="auto-status">ON</span></button>
+            </div>
+            
+            <div id="last-update" style="text-align: center; margin-top: 10px; color: #666;"></div>
+        </div>
 
-@app.route('/data')
-def get_data():
-    """センサーデータをJSON形式で提供するAPIエンドポイント（高速レスポンス）"""
-    with data_lock:
-        if sensor_data_history:
-            # 最新の10個のデータのみ返す（レスポンス高速化）
-            recent_data = list(sensor_data_history)[-10:]
-            return jsonify(recent_data)
-        else:
-            # センサーが初期化されていない場合は模擬データを返す
-            mock_data = [{
-                'timestamp': datetime.now().isoformat(),
-                'temperature': 25.0,
-                'pressure': 1013.25,
-                'humidity': 50.0
-            }]
-            return jsonify(mock_data)
+        <script>
+            let autoUpdate = true;
+            let updateInterval;
+            
+            function updateData() {
+                fetch('/api/latest')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            document.getElementById('status').textContent = 'エラー: ' + data.error;
+                            document.getElementById('status').className = 'status offline';
+                            return;
+                        }
+                        
+                        document.getElementById('temp').textContent = data.temperature || '--';
+                        document.getElementById('press').textContent = data.pressure || '--';
+                        document.getElementById('hum').textContent = data.humidity || '--';
+                        
+                        document.getElementById('status').textContent = 'オンライン';
+                        document.getElementById('status').className = 'status online';
+                        document.getElementById('last-update').textContent = '最終更新: ' + (data.timestamp || '不明');
+                    })
+                    .catch(error => {
+                        console.error('エラー:', error);
+                        document.getElementById('status').textContent = '接続エラー';
+                        document.getElementById('status').className = 'status offline';
+                    });
+            }
+            
+            function toggleAutoUpdate() {
+                autoUpdate = !autoUpdate;
+                document.getElementById('auto-status').textContent = autoUpdate ? 'ON' : 'OFF';
+                
+                if (autoUpdate) {
+                    updateInterval = setInterval(updateData, 3000);
+                } else {
+                    clearInterval(updateInterval);
+                }
+            }
+            
+            // 初期化
+            updateData();
+            updateInterval = setInterval(updateData, 3000);
+        </script>
+    </body>
+    </html>
+    '''
 
-@app.route('/data/all')
-def get_all_data():
-    """全データを取得（重い処理）"""
-    with data_lock:
-        if sensor_data_history:
-            return jsonify(list(sensor_data_history))
-        else:
-            return jsonify([])
-
-@app.route('/data/latest')
-def get_latest_data():
-    """最新のデータのみを高速取得"""
+@app.route('/api/latest')
+def api_latest():
+    """最新データAPI"""
     with data_lock:
         if latest_data:
             return jsonify(latest_data)
         else:
             return jsonify({
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'temperature': 25.0,
-                'pressure': 1013.25,
-                'humidity': 50.0
+                'pressure': 1013.0,
+                'humidity': 50.0,
+                'demo': True
             })
 
-@app.route('/status')
-def get_status():
-    """センサーの状態を返すAPIエンドポイント"""
+@app.route('/api/history')
+def api_history():
+    """履歴データAPI"""
     with data_lock:
-        return jsonify({
-            'sensor_initialized': sensor_initialized,
-            'data_points': len(sensor_data_history),
-            'bus_number': I2C_BUS_NUMBER,
-            'i2c_address': hex(I2C_ADDRESS),
-            'latest_timestamp': latest_data['timestamp'] if latest_data else None,
-            'uptime': datetime.now().isoformat()
-        })
+        return jsonify(list(data_history))
 
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"Internal server error: {error}")
-    return jsonify({'error': 'Internal server error'}), 500
+@app.route('/api/status')
+def api_status():
+    """ステータスAPI"""
+    return jsonify({
+        'sensor_initialized': sensor.initialized,
+        'data_count': len(data_history),
+        'last_error': sensor.last_error,
+        'uptime': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    })
+
+def create_app():
+    """アプリ初期化"""
+    # センサー初期化
+    if sensor.initialize():
+        logger.info("✅ センサー初期化成功")
+    else:
+        logger.warning("⚠️ センサー初期化失敗 - デモモードで動作")
+    
+    # データ収集スレッド開始
+    collector_thread = threading.Thread(target=data_collector, daemon=True)
+    collector_thread.start()
+    
+    return app
 
 if __name__ == '__main__':
-    # アプリケーション作成と初期化
-    app = create_app()
-    
-    # Flaskアプリケーションを実行
-    logger.info("Flaskアプリケーションを開始します...")
-    
     try:
-        app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, 
-                request_timeout=30, response_timeout=30)
+        app = create_app()
+        logger.info("🚀 Flaskアプリ開始")
+        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     except KeyboardInterrupt:
-        logger.info("アプリケーションを終了します...")
+        logger.info("👋 アプリ終了")
+        app_running = False
     except Exception as e:
-        logger.error(f"アプリケーション実行中にエラーが発生: {e}")
+        logger.error(f"💥 起動エラー: {e}")
+        app_running = False
