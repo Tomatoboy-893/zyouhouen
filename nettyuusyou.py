@@ -31,9 +31,9 @@ I2C_ADDRESS = 0x76      # BME280のI2Cアドレス (0x76 または 0x77)
 # -- Gmailと通知に関する設定 --
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SENDER_EMAIL = "dendai.tomatoboy@gmail.com"          # 送信元にするあなたのGmailアドレス
-SENDER_PASSWORD = "aizfmqsnldfrlbfh"     # Googleアカウントで取得した16桁のアプリパスワード
-RECEIVER_EMAIL = "dendai.tomatoboy@gmail.com" # 通知を受け取りたいメールアドレス（自分宛てでOK）
+SENDER_EMAIL =          # 送信元にするあなたのGmailアドレス
+SENDER_PASSWORD =      # Googleアカウントで取得した16桁のアプリパスワード
+RECEIVER_EMAIL = # 通知を受け取りたいメールアドレス（自分宛てでOK）
 
 # -- 熱中症アラートの条件設定 --
 # 条件1: または、条件2: のいずれかを満たした場合に「危険」と判断します。
