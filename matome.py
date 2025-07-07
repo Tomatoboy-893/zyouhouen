@@ -23,10 +23,9 @@ from email.mime.text import MIMEText
 from email.header import Header
 from smbus2 import SMBus
 
-# LINE通知のために追加するライブラリ
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
-
+# LINE通知のために追加するライブラリ (line-bot-sdk v3.0.0以降に対応)
+from linebot.v3.messaging import MessagingApi, PushMessageRequest, TextMessage
+# LineBotApi および linebot.models.TextSendMessage はv3で非推奨または別の場所に移りました
 
 # -- センサーに関する設定 --
 I2C_BUS_NUMBER = 1      # ラズパイのI2Cバス番号 (通常は1)
@@ -35,23 +34,24 @@ I2C_ADDRESS = 0x76      # BME280のI2Cアドレス (0x76 または 0x77)
 # -- Gmailと通知に関する設定 --
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SENDER_EMAIL = ""          # 送信元にするあなたのGmailアドレス
+SENDER_EMAIL = ""         # 送信元にするあなたのGmailアドレス (例: "your_email@gmail.com")
 SENDER_PASSWORD = ""       # Googleアカウントで取得した16桁のアプリパスワード
-RECEIVER_EMAIL = ""        # 通知を受け取りたいメールアドレス（自分宛てでOK）
+RECEIVER_EMAIL = ""       # 通知を受け取りたいメールアドレス（自分宛てでOK） (例: "your_email@example.com")
 
 # --- LINE通知に関する設定 ---
 # 環境変数からLINEの認証情報を取得します。
 # 例: export LINE_CHANNEL_ACCESS_TOKEN="YOUR_CHANNEL_ACCESS_TOKEN"
 # 例: export LINE_CHANNEL_SECRET="YOUR_CHANNEL_SECRET"
 # 動作テスト時、一時的に直接ここに記述することも可能ですが、本番運用では環境変数を推奨します。
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', '') # 環境変数がない場合のデフォルト値を空文字列に
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET', '')             # 環境変数がない場合のデフォルト値を空文字列に
 
 # 熱中症アラートを受け取るLINEユーザーのID
 # メッセージを送りたいユーザーのIDをここに設定してください。
-# 複数人に送りたい場合はリストで管理し、ループで送信します。
+# 【重要】これはLINE Botと友達になったあなたのLINEアカウントのユーザーIDです。
+# あなたの個人のLINE ID（LINEアプリのプロフィールに表示されるID）とは異なります。
 # 例: LINE_USER_ID_TO_SEND = "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-LINE_USER_ID_TO_SEND = "" # ここを実際のLINEユーザーIDに置き換えてください
+LINE_USER_ID_TO_SEND = os.getenv('LINE_USER_ID_TO_SEND', '') # 環境変数がない場合のデフォルト値を空文字列に
 
 # LINE Bot APIの初期化
 line_bot_api = None # 後ほどmain関数内で初期化します
@@ -74,7 +74,6 @@ t_fine = 0.0
 
 # --- BME280センサー制御関数群 ---
 # 低レベルのI2C通信や補正計算を行うための関数です。
-# ... (BME280センサー制御関数は変更なし) ...
 
 def write_reg(reg_address, data):
     """I2Cバスに1バイト書き込む"""
@@ -210,14 +209,15 @@ def send_alert_email(temp, humi):
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] >> エラー: Gmail送信に失敗しました: {e}")
 
-# --- LINE送信関数を追加 ---
+# --- LINE送信関数 ---
 def send_alert_line(temp, humi):
     """熱中症警戒アラートをLINEで送信する"""
     global line_bot_api # グローバル変数にアクセス
     
     # LINEの認証情報と送信先IDが設定されているかチェック
-    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not LINE_USER_ID_TO_SEND:
-        print("LINEの認証情報または送信先ユーザーIDが設定されていません。LINEアラートはスキップします。")
+    # LINE_CHANNEL_SECRETはMessagingApiの初期化には不要ですが、Bot全体のセットアップには必要です。
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID_TO_SEND:
+        print("LINEの認証情報（アクセストークン）または送信先ユーザーIDが設定されていません。LINEアラートはスキップします。")
         return
 
     alert_message = (
@@ -232,12 +232,19 @@ def send_alert_line(temp, humi):
     try:
         # line_bot_apiが初期化されていることを確認
         if line_bot_api:
-            line_bot_api.push_message(LINE_USER_ID_TO_SEND, TextSendMessage(text=alert_message))
+            # line-bot-sdk v3の推奨されるpush_messageの呼び出し方
+            messages_to_send = [TextMessage(text=alert_message)]
+            push_request = PushMessageRequest(to=LINE_USER_ID_TO_SEND, messages=messages_to_send)
+            line_bot_api.push_message(push_request)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] >> LINEアラートの送信に成功しました。")
         else:
             print("LINE Bot APIが初期化されていません。")
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] >> エラー: LINEメッセージ送信に失敗しました: {e}")
+        # LINE Bot APIのエラーレスポンスをより詳細に表示
+        if hasattr(e, 'error_response'):
+            print(f"    LINE APIエラー詳細: {e.error_response}")
+
 
 # --- メイン処理 ---
 def main():
@@ -246,28 +253,48 @@ def main():
     global line_bot_api # LINE Bot APIのグローバル変数を参照可能にする
 
     # LINE Bot APIの初期化
-    if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
-        line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    # MessagingApiの初期化にはCHANNEL_ACCESS_TOKENのみが必要です。
+    # CHANNEL_SECRETはWebhookの署名検証などに使用されますが、このスクリプトのPush API利用には直接不要です。
+    if LINE_CHANNEL_ACCESS_TOKEN:
+        line_bot_api = MessagingApi(LINE_CHANNEL_ACCESS_TOKEN)
         print("LINE Bot APIを初期化しました。")
     else:
-        print("LINE Bot APIの認証情報が不足しているため、LINE通知は無効です。")
+        print("LINE Bot APIの認証情報（アクセストークン）が不足しているため、LINE通知は無効です。")
+        print("環境変数 LINE_CHANNEL_ACCESS_TOKEN を設定してください。")
 
 
     try:
         bus = SMBus(I2C_BUS_NUMBER)
     except Exception as e:
         print(f"エラー: I2Cバス {I2C_BUS_NUMBER} を開けませんでした: {e}")
+        print("I2Cバスの有効化と接続を確認してください。")
         return
 
     print("センサー初期化中...")
-    if not setup_sensor() or not get_calib_param():
-        print("センサーの初期化に失敗。接続を確認してください。")
+    # センサーのセットアップと補正パラメータの読み込みを試みる
+    if not setup_sensor():
+        print("エラー: センサーの動作モード設定に失敗しました。接続を確認してください。")
         if bus: bus.close()
         return
+    if not get_calib_param():
+        print("エラー: センサーの補正パラメータ読み込みに失敗しました。接続を確認してください。")
+        if bus: bus.close()
+        return
+
     print("センサー初期化完了。")
     print("-" * 40)
     print(f"監視を開始します。(測定間隔: {INTERVAL_SECONDS}秒)")
     print(f"危険判断のしきい値: {TEMP_THRESHOLD_DANGER}℃ または ({TEMP_THRESHOLD_WARNING}℃ かつ {HUMI_THRESHOLD_WARNING}%)")
+    # LINE設定の確認メッセージを追加
+    if LINE_CHANNEL_ACCESS_TOKEN and LINE_USER_ID_TO_SEND:
+        print(f"LINE通知は有効です。送信先ユーザーID: {LINE_USER_ID_TO_SEND}")
+    else:
+        print("LINE通知は無効です（認証情報またはユーザーIDが未設定）。")
+    if SENDER_EMAIL and SENDER_PASSWORD and RECEIVER_EMAIL:
+        print(f"Gmail通知は有効です。送信元: {SENDER_EMAIL}, 送信先: {RECEIVER_EMAIL}")
+    else:
+        print("Gmail通知は無効です（認証情報が未設定）。")
+
     print("Ctrl+Cで中断できます。")
     print("-" * 40)
 
