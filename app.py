@@ -128,13 +128,25 @@ class BME280Sensor:
             logger.error(f"生データ読み込み失敗: {e}")
             return None, None, None
     
-    def compensate_temp(self, raw):
-        """温度補正"""
-        if not self.digT or raw is None: return None
-        var1 = (raw / 16384.0 - self.digT[0] / 1024.0) * self.digT[1]
-        var2 = ((raw / 131072.0 - self.digT[0] / 8192.0) ** 2) * self.digT[2]
-        self.t_fine = var1 + var2
-        return self.t_fine / 5120.0
+   def compensate_humidity(self, raw):
+        """湿度補正（データシート準拠版）"""
+        if not self.digH or raw is None or self.t_fine == 0: return None
+
+        # データシートの計算式をより忠実に再現
+        v_x1_u32r = self.t_fine - 76800.0
+        if v_x1_u32r == 0:
+            return 0  # ゼロ除算を避ける
+
+        # 複雑な計算式の部分
+        # データシートの推奨する計算順序に沿って実装
+        v_x1_u32r = (raw - (self.digH[3] * 64.0 + self.digH[4] / 16384.0 * v_x1_u32r)) * \
+                    (self.digH[1] / 65536.0 * (1.0 + self.digH[5] / 67108864.0 * v_x1_u32r * \
+                    (1.0 + self.digH[2] / 67108864.0 * v_x1_u32r)))
+
+        humidity = v_x1_u32r * (1.0 - self.digH[0] * v_x1_u32r / 524288.0)
+
+        # 0%未満または100%超にならないように値を丸める
+        return max(0.0, min(100.0, humidity))
     
     def compensate_pressure(self, raw):
         """気圧補正（簡略版）"""
