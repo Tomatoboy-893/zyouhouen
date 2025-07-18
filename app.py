@@ -104,13 +104,17 @@ class BME280Sensor:
             if val is None: return False
             self.digP.append(val)
         
-        # 湿度校正（簡略化）
-        h1 = self.read_byte(0xA1)
-        h2 = self.read_word(0xE1, True)
-        h3 = self.read_byte(0xE3)
-        if None in [h1, h2, h3]: return False
+        # 湿度校正
+        self.digH = []
+        self.digH.append(self.read_byte(0xA1)) # H1
+        calib_data = self.bus.read_i2c_block_data(self.I2C_ADDR, 0xE1, 7)
+        self.digH.append((calib_data[1] << 8) | calib_data[0]) # H2
+        self.digH.append(calib_data[2]) # H3
+        self.digH.append((calib_data[3] << 4) | (calib_data[4] & 0x0F)) # H4
+        self.digH.append((calib_data[5] << 4) | (calib_data[4] >> 4)) # H5
+        self.digH.append(calib_data[6]) # H6
+        if None in self.digH: return False
         
-        self.digH = [h1, h2, h3, 0, 0, 0]  # 簡略版
         return True
     
     def read_raw_data(self):
@@ -127,48 +131,42 @@ class BME280Sensor:
         except Exception as e:
             logger.error(f"生データ読み込み失敗: {e}")
             return None, None, None
-    
-   def compensate_humidity(self, raw):
-        """湿度補正（データシート準拠版）"""
-        if not self.digH or raw is None or self.t_fine == 0: return None
 
-        # データシートの計算式をより忠実に再現
-        v_x1_u32r = self.t_fine - 76800.0
-        if v_x1_u32r == 0:
-            return 0  # ゼロ除算を避ける
+    def compensate_temp(self, raw_temp):
+        """温度補正 (t_fine計算を含む)"""
+        var1 = (raw_temp / 16384.0 - self.digT[0] / 1024.0) * self.digT[1]
+        var2 = ((raw_temp / 131072.0 - self.digT[0] / 8192.0) *
+                (raw_temp / 131072.0 - self.digT[0] / 8192.0)) * self.digT[2]
+        self.t_fine = var1 + var2
+        temperature = self.t_fine / 5120.0
+        return temperature
 
-        # 複雑な計算式の部分
-        # データシートの推奨する計算順序に沿って実装
-        v_x1_u32r = (raw - (self.digH[3] * 64.0 + self.digH[4] / 16384.0 * v_x1_u32r)) * \
-                    (self.digH[1] / 65536.0 * (1.0 + self.digH[5] / 67108864.0 * v_x1_u32r * \
-                    (1.0 + self.digH[2] / 67108864.0 * v_x1_u32r)))
-
-        humidity = v_x1_u32r * (1.0 - self.digH[0] * v_x1_u32r / 524288.0)
-
-        # 0%未満または100%超にならないように値を丸める
-        return max(0.0, min(100.0, humidity))
-    
-    def compensate_pressure(self, raw):
-        """気圧補正（簡略版）"""
-        if not self.digP or raw is None or self.t_fine == 0: return None
+    def compensate_pressure(self, raw_pres):
+        """気圧補正（データシート準拠版）"""
+        if not self.digP or raw_pres is None or self.t_fine == 0: return None
         var1 = (self.t_fine / 2.0) - 64000.0
         var2 = var1 * var1 * self.digP[5] / 32768.0
         var2 = var2 + var1 * self.digP[4] * 2.0
         var2 = (var2 / 4.0) + (self.digP[3] * 65536.0)
         var1 = (self.digP[2] * var1 * var1 / 524288.0 + self.digP[1] * var1) / 524288.0
         var1 = (1.0 + var1 / 32768.0) * self.digP[0]
-        if var1 == 0: return None
-        pressure = 1048576.0 - raw
-        pressure = (pressure - (var2 / 4096.0)) * 6250.0 / var1
-        return pressure / 100.0  # hPa
-    
-    def compensate_humidity(self, raw):
-        """湿度補正（簡略版）"""
-        if not self.digH or raw is None or self.t_fine == 0: return None
-        var_H = self.t_fine - 76800.0
-        if var_H == 0: return 0
-        var_H = (raw - (self.digH[3] * 64.0)) * (self.digH[1] / 65536.0)
-        humidity = var_H * (1.0 - self.digH[0] * var_H / 524288.0)
+        if var1 == 0:
+            return 0
+        p = 1048576.0 - raw_pres
+        p = (p - (var2 / 4096.0)) * 6250.0 / var1
+        var1 = self.digP[8] * p * p / 2147483648.0
+        var2 = p * self.digP[7] / 32768.0
+        p = p + (var1 + var2 + self.digP[6]) / 16.0
+        return p / 100.0 # hPaに変換
+
+    def compensate_humidity(self, raw_hum):
+        """湿度補正（データシート準拠版）"""
+        if not self.digH or raw_hum is None or self.t_fine == 0: return None
+        v_x1_u32r = self.t_fine - 76800.0
+        v_x1_u32r = (raw_hum - (self.digH[3] * 64.0 + self.digH[4] / 16384.0 * v_x1_u32r)) * \
+                    (self.digH[1] / 65536.0 * (1.0 + self.digH[5] / 67108864.0 * v_x1_u32r * \
+                    (1.0 + self.digH[2] / 67108864.0 * v_x1_u32r)))
+        humidity = v_x1_u32r * (1.0 - self.digH[0] * v_x1_u32r / 524288.0)
         return max(0.0, min(100.0, humidity))
     
     def initialize(self):
@@ -200,7 +198,7 @@ class BME280Sensor:
             return None, None, None
         
         temp_raw, pres_raw, hum_raw = self.read_raw_data()
-        if temp_raw is None:
+        if temp_raw is None or pres_raw is None or hum_raw is None:
             return None, None, None
         
         temperature = self.compensate_temp(temp_raw)
@@ -239,7 +237,8 @@ def data_collector():
                 
                 logger.debug(f"データ更新: {temp:.1f}°C, {pres:.1f}hPa, {hum:.1f}%")
             else:
-                logger.warning("センサーデータ読み込み失敗")
+                if sensor.initialized: # 初期化成功後に読み取れなくなった場合
+                    logger.warning("センサーデータ読み込み失敗")
             
         except Exception as e:
             logger.error(f"データ収集エラー: {e}")
@@ -260,18 +259,25 @@ def index():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }
-            .sensor-data { display: flex; justify-content: space-around; margin: 20px 0; }
-            .data-box { text-align: center; padding: 15px; background: #e3f2fd; border-radius: 8px; min-width: 120px; }
-            .value { font-size: 24px; font-weight: bold; color: #1976d2; }
-            .unit { font-size: 14px; color: #666; }
-            .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
-            .online { background: #c8e6c9; color: #2e7d32; }
-            .offline { background: #ffcdd2; color: #c62828; }
-            button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
-            .btn-primary { background: #1976d2; color: white; }
-            .btn-secondary { background: #757575; color: white; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 20px; background: #f4f7f9; color: #333; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+            h1 { color: #1a237e; }
+            .sensor-data { display: flex; flex-wrap: wrap; justify-content: space-around; margin: 25px 0; gap: 15px; }
+            .data-box { text-align: center; padding: 20px; background: #e8eaf6; border-radius: 10px; min-width: 130px; flex-grow: 1; transition: transform 0.2s; }
+            .data-box:hover { transform: translateY(-5px); }
+            .value { font-size: 28px; font-weight: 600; color: #3f51b5; }
+            .unit { font-size: 14px; color: #555; }
+            .label { font-size: 16px; margin-top: 5px; color: #333; }
+            .status { padding: 10px 15px; margin: 20px 0; border-radius: 8px; text-align: center; font-weight: 500;}
+            .online { background: #e8f5e9; color: #2e7d32; border-left: 5px solid #4caf50; }
+            .offline { background: #ffebee; color: #c62828; border-left: 5px solid #f44336; }
+            .demo { background: #e3f2fd; color: #1565c0; border-left: 5px solid #2196f3; }
+            .controls { text-align: center; margin-top: 20px; }
+            button { padding: 10px 20px; margin: 5px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; transition: background-color 0.2s; }
+            .btn-primary { background: #3f51b5; color: white; }
+            .btn-primary:hover { background: #303f9f; }
+            .btn-secondary { background: #9e9e9e; color: white; }
+            .btn-secondary:hover { background: #757575; }
         </style>
     </head>
     <body>
@@ -283,26 +289,26 @@ def index():
                 <div class="data-box">
                     <div class="value" id="temp">--</div>
                     <div class="unit">°C</div>
-                    <div>温度</div>
+                    <div class="label">温度</div>
                 </div>
                 <div class="data-box">
                     <div class="value" id="press">--</div>
                     <div class="unit">hPa</div>
-                    <div>気圧</div>
+                    <div class="label">気圧</div>
                 </div>
                 <div class="data-box">
                     <div class="value" id="hum">--</div>
                     <div class="unit">%</div>
-                    <div>湿度</div>
+                    <div class="label">湿度</div>
                 </div>
             </div>
             
-            <div style="text-align: center;">
+            <div class="controls">
                 <button class="btn-primary" onclick="updateData()">データ更新</button>
                 <button class="btn-secondary" onclick="toggleAutoUpdate()">自動更新: <span id="auto-status">ON</span></button>
             </div>
             
-            <div id="last-update" style="text-align: center; margin-top: 10px; color: #666;"></div>
+            <div id="last-update" style="text-align: center; margin-top: 15px; color: #777; font-size: 14px;"></div>
         </div>
 
         <script>
@@ -311,26 +317,36 @@ def index():
             
             function updateData() {
                 fetch('/api/latest')
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.error) {
-                            document.getElementById('status').textContent = 'エラー: ' + data.error;
-                            document.getElementById('status').className = 'status offline';
-                            return;
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error('Network response was not ok');
                         }
+                        return response.json();
+                    })
+                    .then(data => {
+                        const statusEl = document.getElementById('status');
                         
-                        document.getElementById('temp').textContent = data.temperature || '--';
-                        document.getElementById('press').textContent = data.pressure || '--';
-                        document.getElementById('hum').textContent = data.humidity || '--';
-                        
-                        document.getElementById('status').textContent = 'オンライン';
-                        document.getElementById('status').className = 'status online';
+                        document.getElementById('temp').textContent = data.temperature !== undefined ? data.temperature : '--';
+                        document.getElementById('press').textContent = data.pressure !== undefined ? data.pressure : '--';
+                        document.getElementById('hum').textContent = data.humidity !== undefined ? data.humidity : '--';
                         document.getElementById('last-update').textContent = '最終更新: ' + (data.timestamp || '不明');
+
+                        if (data.demo) {
+                            statusEl.textContent = 'デモモードで動作中';
+                            statusEl.className = 'status demo';
+                        } else if (data.error) {
+                            statusEl.textContent = 'エラー: ' + data.error;
+                            statusEl.className = 'status offline';
+                        } else {
+                            statusEl.textContent = 'オンライン';
+                            statusEl.className = 'status online';
+                        }
                     })
                     .catch(error => {
                         console.error('エラー:', error);
-                        document.getElementById('status').textContent = '接続エラー';
-                        document.getElementById('status').className = 'status offline';
+                        const statusEl = document.getElementById('status');
+                        statusEl.textContent = 'サーバー接続エラー';
+                        statusEl.className = 'status offline';
                     });
             }
             
@@ -339,15 +355,20 @@ def index():
                 document.getElementById('auto-status').textContent = autoUpdate ? 'ON' : 'OFF';
                 
                 if (autoUpdate) {
-                    updateInterval = setInterval(updateData, 3000);
+                    if (!updateInterval) {
+                        updateInterval = setInterval(updateData, 5000);
+                    }
                 } else {
                     clearInterval(updateInterval);
+                    updateInterval = null;
                 }
             }
             
             // 初期化
-            updateData();
-            updateInterval = setInterval(updateData, 3000);
+            document.addEventListener('DOMContentLoaded', () => {
+                updateData();
+                updateInterval = setInterval(updateData, 5000);
+            });
         </script>
     </body>
     </html>
@@ -360,11 +381,12 @@ def api_latest():
         if latest_data:
             return jsonify(latest_data)
         else:
+            # センサーが初期化されていない場合、デモデータを返す
             return jsonify({
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'temperature': 25.0,
-                'pressure': 1013.0,
-                'humidity': 50.0,
+                'pressure': 1013.2,
+                'humidity': 55.0,
                 'demo': True
             })
 
@@ -377,12 +399,13 @@ def api_history():
 @app.route('/api/status')
 def api_status():
     """ステータスAPI"""
-    return jsonify({
-        'sensor_initialized': sensor.initialized,
-        'data_count': len(data_history),
-        'last_error': sensor.last_error,
-        'uptime': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    })
+    with data_lock:
+        return jsonify({
+            'sensor_initialized': sensor.initialized,
+            'data_count': len(data_history),
+            'last_error': sensor.last_error,
+            'app_start_time': app.config.get('START_TIME')
+        })
 
 def create_app():
     """アプリ初期化"""
@@ -390,22 +413,26 @@ def create_app():
     if sensor.initialize():
         logger.info("✅ センサー初期化成功")
     else:
-        logger.warning("⚠️ センサー初期化失敗 - デモモードで動作")
+        logger.warning("⚠️ センサー初期化失敗 - デモモードで動作します")
     
     # データ収集スレッド開始
     collector_thread = threading.Thread(target=data_collector, daemon=True)
     collector_thread.start()
     
+    app.config['START_TIME'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     return app
 
 if __name__ == '__main__':
     try:
         app = create_app()
-        logger.info("🚀 Flaskアプリ開始")
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+        logger.info("🚀 Flaskアプリ起動 (http://0.0.0.0:5000)")
+        # Waitress を本番環境での使用に推奨
+        # from waitress import serve
+        # serve(app, host='0.0.0.0', port=5000)
+        app.run(host='0.0.0.0', port=5000, debug=False)
     except KeyboardInterrupt:
-        logger.info("👋 アプリ終了")
+        logger.info("👋 アプリケーションを終了します")
         app_running = False
     except Exception as e:
-        logger.error(f"💥 起動エラー: {e}")
+        logger.critical(f"💥 起動エラー: {e}")
         app_running = False
