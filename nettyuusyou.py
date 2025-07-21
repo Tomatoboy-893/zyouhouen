@@ -39,7 +39,7 @@ RECEIVER_EMAIL = # 通知を受け取りたいメールアドレス（自分宛�
 TEMP_THRESHOLD_DANGER = 31.0
 # 条件2: 温度がこの値を超え、かつ湿度がこの値を超えたら危険
 TEMP_THRESHOLD_WARNING = 28.0
-HUMI_THRESHOLD_WARNING = 75.0
+HUMI_THRESHOLD_WARNING = 50.0
 
 # -- 監視間隔の設定 --
 INTERVAL_SECONDS = 600  # 測定間隔を秒で指定 (600秒 = 10分)
