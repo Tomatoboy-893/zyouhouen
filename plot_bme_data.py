@@ -1,7 +1,7 @@
 # 必要なライブラリをインポート
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+import pandas as pd # type: ignore
+import matplotlib.pyplot as plt # type: ignore
+import matplotlib.dates as mdates # type: ignore
 import sys
 
 # --- 設定 ---
