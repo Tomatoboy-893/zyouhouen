@@ -1,4 +1,3 @@
-# 必要なライブラリをインポート
 
 from smbus2 import SMBus
 import time
@@ -7,7 +6,7 @@ import csv
 
 I2C_BUS_NUMBER = 1
 I2C_ADDRESS = 0x76
-# --- 追加: 保存するCSVファイル名 ---
+
 OUTPUT_CSV_FILE = 'bme280_log.csv'
 
 # ... (write_reg, read_byte_data_signed, ... compensate_H までの関数はそのまま) ...
@@ -227,8 +226,8 @@ def main():
         return
 
 
-    measurement_duration = 3600  # 3600秒 = 1時間 測定
-    interval = 10  # 10秒間隔
+    measurement_duration = 3600  
+    interval = 10  
     
     print(f"\nセンサーデータの測定を開始します。測定時間: {measurement_duration}秒, 測定間隔: {interval}秒")
     print("Ctrl+Cで中断できます。")
@@ -240,15 +239,14 @@ def main():
             
             temp, pres, hum = read_compensated_data()
             
-            # タイムスタンプはPCでの処理も考慮し、ISO 8601形式を推奨
+        
             timestamp_str = datetime.now().isoformat()
             
             if temp is not None and pres is not None and hum is not None:
-                # 画面への表示
+     
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"T:{temp:.2f}C, P:{pres:.2f}hPa, H:{hum:.2f}% ... CSVに記録しました。")
 
-                # --- 変更: データをCSVファイルに追記 ---
                 try:
                     with open(OUTPUT_CSV_FILE, 'a', newline='', encoding='utf-8') as f:
                         writer = csv.writer(f)
@@ -257,8 +255,7 @@ def main():
                     print(f"警告: CSVファイルへの書き込みに失敗しました: {e}")
             else:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] データ取得に失敗しました。")
-            
-            # 正確なインターバルで待機
+ 
             time_to_wait = interval - (time.time() - loop_iter_start_time)
             if time_to_wait > 0:
                 time.sleep(time_to_wait)
